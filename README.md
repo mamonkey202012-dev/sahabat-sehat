@@ -46,3 +46,6 @@ Agar aplikasi terverifikasi oleh sistem evaluasi otomatis:
        }
      }
    }
+
+🔗 Live Application
+Live Cloud Run URL: https://sahabat-sehat-858249827695.asia-southeast1.run.app
