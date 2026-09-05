@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sahabat Sehat - Asisten Gizi Pesisir Siswa Kelas 6 SD</title>
+    <meta name="description" content="Asisten pembelajaran gizi interaktif PJOK untuk siswa kelas 6 SD kawasan pesisir dengan analisis nilai gizi kemasan via Gemini Vision, kalkulator defisit AKG, dan rekomendasi pangan lokal." />
+    <meta property="og:title" content="Sahabat Sehat - Asisten Gizi Pesisir Siswa Kelas 6 SD" />
+    <meta property="og:description" content="Asisten pembelajaran gizi interaktif PJOK untuk siswa kelas 6 SD kawasan pesisir dengan analisis nilai gizi kemasan via Gemini Vision, kalkulator defisit AKG, dan rekomendasi pangan lokal." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+      // Suppress benign WebSocket HMR connection errors in sandboxed dev environment
+      window.addEventListener('unhandledrejection', function(event) {
+        var msg = (event.reason && (event.reason.message || event.reason)) || '';
+        if (typeof msg === 'string' && (msg.includes('WebSocket') || msg.includes('websocket') || msg.includes('[vite]'))) {
+          event.preventDefault();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        var msg = event.message || '';
+        if (typeof msg === 'string' && (msg.includes('WebSocket') || msg.includes('websocket') || msg.includes('[vite]'))) {
+          event.preventDefault();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

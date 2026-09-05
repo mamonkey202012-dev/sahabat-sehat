@@ -1,0 +1,10 @@
+{
+  "name": "Sahabat Sehat",
+  "description": "Asisten pembelajaran gizi interaktif PJOK untuk siswa kelas 6 SD kawasan pesisir dengan analisis nilai gizi kemasan via Gemini Vision, kalkulator defisit AKG, dan rekomendasi pangan lokal.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
