@@ -2,11 +2,18 @@ import express from 'express';
 import path from 'path';
 import { verifyFirebaseIdToken } from './server/auth';
 import { analyzeNutritionLabel } from './server/gemini';
+import {
+  dispatchExternalNotification,
+  evaluateJournalAlert,
+  getNotificationAuditHistory,
+  getNotificationDirectiveSpec,
+  NotificationPayload,
+} from './server/notifications';
 import firebaseConfig from './firebase-applet-config.json';
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
 
   // Detect production environment reliably across Cloud Run containers
   const isProduction =
@@ -101,6 +108,214 @@ async function startServer() {
       return res.status(500).json({
         error: err.message || 'Terjadi kesalahan saat menganalisis informasi gizi.',
       });
+    }
+  });
+
+  // ==========================================
+  // EXTERNAL NOTIFICATION API DIRECTIVES
+  // ==========================================
+
+  // 1. Get Notification Directive & Payload Schema (Public/Developer Documentation)
+  app.get('/api/notification-directive', (req, res) => {
+    const spec = getNotificationDirectiveSpec();
+    res.json({
+      success: true,
+      spec,
+    });
+  });
+
+  // 2. Get Audit History of Dispatched Notifications
+  app.get('/api/notifications/audit', (req, res) => {
+    const history = getNotificationAuditHistory();
+    res.json({
+      success: true,
+      count: history.length,
+      history,
+    });
+  });
+
+  // 3. Dispatch Notification when a specific journal entry is parsed/logged
+  app.post('/api/notify-external', async (req, res) => {
+    try {
+      // Authenticate caller
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({
+          error: 'Autentikasi diperlukan untuk memicu notifikasi eksternal.',
+        });
+      }
+
+      const idToken = authHeader.split('Bearer ')[1].trim();
+      const expectedProjectId = firebaseConfig.projectId || 'lexical-raceway-507508-s7';
+
+      let userPayload;
+      try {
+        userPayload = await verifyFirebaseIdToken(idToken, expectedProjectId);
+      } catch (authError: any) {
+        return res.status(401).json({
+          error: 'Sesi login tidak valid atau sudah kedaluwarsa.',
+          details: authError.message,
+        });
+      }
+
+      const {
+        foodName,
+        selectedNutrient,
+        akgPercentage,
+        deficiencyPercentage,
+        excessPercentage,
+        coastalSolutionChosen,
+        nutritionalSummary,
+        studentName,
+        schoolClass,
+        customEventType,
+        targetEmail,
+      } = req.body;
+
+      if (!foodName || !selectedNutrient) {
+        return res.status(400).json({
+          error: 'Parameter foodName dan selectedNutrient wajib disertakan.',
+        });
+      }
+
+      // Evaluate alert criteria
+      const evaluation = evaluateJournalAlert({
+        foodName,
+        selectedNutrient,
+        akgPercentage: Number(akgPercentage) || 0,
+        deficiencyPercentage: Number(deficiencyPercentage) || 0,
+        nutritionalSummary,
+        coastalSolutionChosen,
+        studentName: studentName || userPayload.name,
+        studentId: userPayload.user_id,
+      });
+
+      const eventType = customEventType || evaluation.eventType;
+      const severity = evaluation.severity;
+
+      // Construct typed NotificationPayload strictly complying with Directive Schema
+      const notificationPayload: NotificationPayload = {
+        notificationId: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toISOString(),
+        eventType,
+        severity,
+        recipient: {
+          email: targetEmail || process.env.NOTIFICATION_EMAIL_RECIPIENT || 'guru.pjok@sdnegeri-pesisir.sch.id',
+          role: 'teacher',
+          recipientName: 'Guru PJOK / Pembina UKS',
+        },
+        student: {
+          id: userPayload.user_id,
+          name: studentName || userPayload.name || 'Siswa Kelas 6',
+          schoolClass: schoolClass || 'Kelas 6 SD Pesisir',
+        },
+        journalEntry: {
+          foodName,
+          selectedNutrient,
+          akgPercentage: Number(akgPercentage) || 0,
+          deficiencyPercentage: Number(deficiencyPercentage) || 0,
+          excessPercentage: excessPercentage ? Number(excessPercentage) : undefined,
+          coastalSolutionChosen: coastalSolutionChosen || undefined,
+          nutritionalSummary,
+        },
+        actionRecommendation: {
+          summary: evaluation.advice.summary,
+          pedagogicalAdvice: evaluation.advice.pedagogicalAdvice,
+          suggestedAction: evaluation.advice.suggestedAction,
+        },
+        metadata: {
+          sourceApp: 'Sahabat Sehat',
+          version: '1.2.0',
+          framework: 'Kurikulum Merdeka PJOK Fase C (Kelas 6 SD Pesisir)',
+          dispatchedBy: userPayload.user_id,
+        },
+      };
+
+      // Dispatch to external system
+      const dispatchResult = await dispatchExternalNotification(notificationPayload);
+
+      return res.json({
+        success: dispatchResult.success,
+        data: dispatchResult,
+        payload: notificationPayload,
+      });
+    } catch (err: any) {
+      console.error('Error in notify-external:', err);
+      return res.status(500).json({
+        error: err.message || 'Gagal memproses notifikasi eksternal.',
+      });
+    }
+  });
+
+  // 4. Test Notification Trigger Endpoint (for teachers/administrators)
+  app.post('/api/test-notification', async (req, res) => {
+    try {
+      const { alertType, testEmail } = req.body;
+
+      const sampleEntry =
+        alertType === 'CRITICAL_SODIUM_ALERT'
+          ? {
+              foodName: 'Keripik Renyah Ekstra Garam (Uji Coba)',
+              selectedNutrient: 'Natrium',
+              akgPercentage: 42,
+              deficiencyPercentage: 0,
+              excessPercentage: 12,
+              coastalSolutionChosen: 'Sayur Daun Kelor Bening & Air Putih',
+            }
+          : {
+              foodName: 'Biskuit Manis Salty (Uji Coba)',
+              selectedNutrient: 'Protein',
+              akgPercentage: 4,
+              deficiencyPercentage: 26,
+              excessPercentage: 0,
+              coastalSolutionChosen: 'Ikan Kembung Kukus Bumbu Kuning',
+            };
+
+      const evaluation = evaluateJournalAlert({
+        foodName: sampleEntry.foodName,
+        selectedNutrient: sampleEntry.selectedNutrient,
+        akgPercentage: sampleEntry.akgPercentage,
+        deficiencyPercentage: sampleEntry.deficiencyPercentage,
+      });
+
+      const notificationPayload: NotificationPayload = {
+        notificationId: `test_notif_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        eventType: (alertType as any) || evaluation.eventType,
+        severity: evaluation.severity,
+        recipient: {
+          email: testEmail || process.env.NOTIFICATION_EMAIL_RECIPIENT || 'guru.pjok@sdnegeri-pesisir.sch.id',
+          role: 'teacher',
+          recipientName: 'Guru PJOK (Simulasi Pengujian)',
+        },
+        student: {
+          id: 'siswa_demo_001',
+          name: 'Budi Santoso (Simulasi Uji)',
+          schoolClass: 'Kelas 6 SD Pesisir',
+        },
+        journalEntry: sampleEntry,
+        actionRecommendation: {
+          summary: evaluation.advice.summary,
+          pedagogicalAdvice: evaluation.advice.pedagogicalAdvice,
+          suggestedAction: evaluation.advice.suggestedAction,
+        },
+        metadata: {
+          sourceApp: 'Sahabat Sehat',
+          version: '1.2.0',
+          framework: 'Kurikulum Merdeka PJOK Fase C (Kelas 6 SD Pesisir)',
+          dispatchedBy: 'system_test',
+        },
+      };
+
+      const result = await dispatchExternalNotification(notificationPayload);
+
+      return res.json({
+        success: result.success,
+        data: result,
+        payload: notificationPayload,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
     }
   });
 

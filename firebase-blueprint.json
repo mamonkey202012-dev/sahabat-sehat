@@ -1,0 +1,85 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile containing identity and role information (student, teacher, or admin)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique user identifier matching Firebase Auth UID" },
+        "displayName": { "type": "string", "description": "Display name of the student or teacher" },
+        "email": { "type": "string", "description": "Email address of the user" },
+        "photoURL": { "type": "string", "description": "Avatar URL of the user" },
+        "role": {
+          "type": "string",
+          "description": "Access control role: student, teacher, or admin",
+          "enum": ["student", "teacher", "admin"]
+        },
+        "schoolClass": { "type": "string", "description": "Class grade or section (e.g., Kelas 6 SD Pesisir)" },
+        "createdAt": { "type": "string", "description": "Account registration timestamp" }
+      },
+      "required": ["uid", "role"]
+    },
+    "FoodLog": {
+      "title": "FoodLog",
+      "description": "Detailed private student food log entry containing nutritional amounts and reflection",
+      "type": "object",
+      "properties": {
+        "foodName": { "type": "string", "description": "Name of food consumed" },
+        "imageUrl": { "type": "string", "description": "URL or base64 preview of the food label image" },
+        "nutritionalData": { "type": "object", "description": "Macronutrient breakdown" },
+        "selectedNutrient": { "type": "string", "description": "Nutrient investigated during Step 2 & 3" },
+        "selectedNutrientKey": { "type": "string", "description": "Nutrient key (karbohidrat, lemak, natrium, protein)" },
+        "deficit": { "type": "number", "description": "Calculated deficit percentage" },
+        "localFoodSolution": { "type": "string", "description": "Selected coastal food solution" },
+        "studentReflection": { "type": "string", "description": "Student reflection note" },
+        "userId": { "type": "string", "description": "Owner student UID" },
+        "timestamp": { "type": "string", "description": "Timestamp of log creation" }
+      },
+      "required": ["foodName", "selectedNutrient", "userId"]
+    },
+    "NutritionLog": {
+      "title": "NutritionLog",
+      "description": "Aggregated structured nutrition log entry for teacher monitoring and class trend dashboards",
+      "type": "object",
+      "properties": {
+        "student_id": { "type": "string", "description": "Authenticated student user UID" },
+        "student_name": { "type": "string", "description": "Name of the student" },
+        "timestamp": { "type": "string", "description": "ISO timestamp string of when Step 4 reflection completed" },
+        "food_item": { "type": "string", "description": "Name of the packaged snack or food" },
+        "selected_nutrient": {
+          "type": "string",
+          "description": "The specific nutrient investigated",
+          "enum": ["Karbohidrat", "Natrium", "Protein", "Lemak", "Karbohidrat Total", "Natrium / Garam", "Lemak Total"]
+        },
+        "akg_percentage": { "type": "number", "description": "Percentage of AKG contained in the food" },
+        "deficiency_percentage": { "type": "number", "description": "Calculated nutrient deficit percentage against 30% AKG ideal" },
+        "chosen_local_solution": { "type": "string", "description": "Chosen coastal food solution (e.g. Ikan Kembung, Daun Kelor)" },
+        "balanced_status": { "type": "boolean", "description": "True if the student selected a healthy solution to balance the meal" }
+      },
+      "required": [
+        "student_id",
+        "timestamp",
+        "food_item",
+        "selected_nutrient",
+        "akg_percentage",
+        "deficiency_percentage",
+        "chosen_local_solution",
+        "balanced_status"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles storing RBAC role (student vs teacher/admin)"
+    },
+    "/users/{userId}/food_logs/{logId}": {
+      "schema": { "$ref": "#/entities/FoodLog" },
+      "description": "Private student food log entries"
+    },
+    "/nutrition_logs/{logId}": {
+      "schema": { "$ref": "#/entities/NutritionLog" },
+      "description": "Aggregated class nutrition logs accessible by teachers and admins for trend analysis"
+    }
+  }
+}

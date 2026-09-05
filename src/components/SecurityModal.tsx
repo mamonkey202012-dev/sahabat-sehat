@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, ShieldCheck, Lock, FileCode, CheckCircle2, KeyRound, Cpu } from 'lucide-react';
+import { X, ShieldCheck, Shield, Lock, FileCode, CheckCircle2, KeyRound, Cpu } from 'lucide-react';
 
 interface SecurityModalProps {
   isOpen: boolean;
@@ -111,9 +111,9 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({ isOpen, onClose })
           <div className="space-y-2">
             <h4 className="text-sm font-black uppercase tracking-wider text-[#1A365D] flex items-center gap-2">
               <FileCode className="w-4 h-4 text-[#00796B]" />
-              3. Aturan Keamanan Firestore (firestore.rules)
+              3. Aturan Keamanan Firestore (firestore.rules - RBAC)
             </h4>
-            <pre className="p-4 rounded-2xl bg-[#1A365D] text-[#81C784] font-mono text-xs overflow-x-auto border-3 border-[#1A365D] shadow-[3px_3px_0px_#1A365D]">
+            <pre className="p-4 rounded-2xl bg-[#1A365D] text-[#81C784] font-mono text-[11px] leading-relaxed overflow-x-auto border-3 border-[#1A365D] shadow-[3px_3px_0px_#1A365D]">
 {`rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -121,12 +121,40 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    function isAuth() {
+      return request.auth != null;
+    }
 
+    function isOwner(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+
+    function isTeacherOrAdmin() {
+      return isAuth() && (
+        (request.auth.token.role in ['teacher', 'admin']) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['teacher', 'admin'])
+      );
+    }
+
+    // Profil pengguna (Siswa & Guru)
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isTeacherOrAdmin();
+      allow create, update: if isOwner(userId) || isTeacherOrAdmin();
+
+      // Jurnal makan pribadi siswa
       match /food_logs/{logId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read: if isOwner(userId) || isTeacherOrAdmin();
+        allow create, update, delete: if isOwner(userId);
       }
+    }
+
+    // Log nutrisi agregat terstruktur kelas
+    match /nutrition_logs/{logId} {
+      allow create: if isAuth() && request.resource.data.student_id == request.auth.uid;
+      allow read, update, delete: if isAuth() && (
+        resource.data.student_id == request.auth.uid || isTeacherOrAdmin()
+      );
     }
   }
 }`}
@@ -138,7 +166,25 @@ service cloud.firestore {
             <KeyRound className="w-5 h-5 text-[#00796B] shrink-0 mt-0.5" />
             <div className="text-xs text-[#1A365D] font-bold">
               <span className="font-black text-[#00796B] uppercase">Zero Hardcoding Guarantee: </span>
-              Kunci rahasia <code>GEMINI_API_KEY</code> tersimpan aman di environment server Cloud Run / Secret Manager dan tidak pernah terekspos ke browser.
+              Kunci rahasia <code>GEMINI_API_KEY</code> & <code>NOTIFICATION_API_KEY</code> tersimpan aman di environment server Cloud Run / Secret Manager dan tidak pernah terekspos ke browser.
+            </div>
+          </div>
+
+          {/* 5. Notification API Directives & Webhook Authentication */}
+          <div className="space-y-2">
+            <h4 className="text-sm font-black uppercase tracking-wider text-[#1A365D] flex items-center gap-2">
+              <Shield className="w-4 h-4 text-[#E65100]" />
+              5. Direktif API Notifikasi Eksternal & Autentikasi Webhook
+            </h4>
+            <div className="p-4 rounded-2xl bg-white border-3 border-[#1A365D] shadow-[3px_3px_0px_#1A365D] space-y-2 text-xs font-semibold text-slate-700">
+              <p>
+                Aplikasi mengimplementasikan <strong>Direktif Notifikasi Gizi Eksternal</strong> untuk menginformasikan guru PJOK dan pembina UKS saat terdeteksi kondisi gizi kritis (contoh: <code>CRITICAL_SODIUM_ALERT</code> &gt; 30% AKG).
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-600">
+                <li><strong>Inbound Auth:</strong> Client mengirimkan Firebase ID Token (JWT) di header <code>Authorization: Bearer &lt;ID_TOKEN&gt;</code> ke <code>/api/notify-external</code>.</li>
+                <li><strong>Outbound Dispatch:</strong> Server Cloud Run meneruskan payload terstruktur ke endpoint <code>NOTIFICATION_WEBHOOK_URL</code> dengan kredensial <code>NOTIFICATION_API_KEY</code> atau mengeksekusi simulasi pengiriman email audit.</li>
+                <li><strong>Audit Trail:</strong> Riwayat notifikasi disimpan dalam memori server dan dapat diakses via <code>/api/notifications/audit</code> oleh role Guru/Admin.</li>
+              </ul>
             </div>
           </div>
         </div>

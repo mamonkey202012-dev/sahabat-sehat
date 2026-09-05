@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   signInWithPopup,
+  signInAnonymously,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   User,
@@ -10,8 +11,12 @@ import {
   addDoc,
   deleteDoc,
   doc,
+  getDoc,
+  setDoc,
+  getDocFromServer,
   onSnapshot,
   query,
+  where,
   orderBy,
   serverTimestamp,
 } from 'firebase/firestore';
@@ -19,9 +24,11 @@ import confetti from 'canvas-confetti';
 import { auth, googleProvider, db } from './lib/firebase';
 import {
   UserProfile,
+  UserRole,
   NutrientKey,
   NutritionAnalysisResponse,
   FoodLogEntry,
+  StructuredNutritionLog,
 } from './types';
 import { Navbar } from './components/Navbar';
 import { AuthCard } from './components/AuthCard';
@@ -32,14 +39,17 @@ import { Step4CoastalRecommendations } from './components/Step4CoastalRecommenda
 import { FoodJournal } from './components/FoodJournal';
 import { IsiPiringkuGuide } from './components/IsiPiringkuGuide';
 import { SecurityModal } from './components/SecurityModal';
+import { TeacherDashboard } from './components/TeacherDashboard';
+import { Bell, X, AlertOctagon, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [userRole, setUserRole] = useState<UserRole>('student');
   const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
   // Active navigation tab
-  const [activeTab, setActiveTab] = useState<'assistant' | 'journal' | 'guide'>('assistant');
+  const [activeTab, setActiveTab] = useState<'assistant' | 'journal' | 'guide' | 'dashboard'>('assistant');
   const [isSecurityModalOpen, setIsSecurityModalOpen] = useState<boolean>(false);
 
   // Assistant Flow State (Steps 1 - 4)
@@ -60,27 +70,93 @@ export default function App() {
   const [journalLogs, setJournalLogs] = useState<FoodLogEntry[]>([]);
   const [journalLoading, setJournalLoading] = useState<boolean>(false);
 
-  // Listen to Firebase Auth state
+  // Firestore Structured Nutrition Logs for Teacher / Class Dashboard (Directive 2)
+  const [classNutritionLogs, setClassNutritionLogs] = useState<StructuredNutritionLog[]>([]);
+  const [classLogsLoading, setClassLogsLoading] = useState<boolean>(false);
+
+  // External Notification Toast state
+  const [notificationToast, setNotificationToast] = useState<{
+    show: boolean;
+    type: 'critical' | 'warning' | 'info';
+    title: string;
+    message: string;
+  } | null>(null);
+
+  // Auto-dismiss notification toast
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user: User | null) => {
+    if (notificationToast?.show) {
+      const timer = setTimeout(() => {
+        setNotificationToast(null);
+      }, 7000);
+      return () => clearTimeout(timer);
+    }
+  }, [notificationToast]);
+
+  // Validate connection to Firestore on initial boot (Firebase Skill Guideline)
+  useEffect(() => {
+    async function testConnection() {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.error('Please check your Firebase configuration.');
+        }
+      }
+    }
+    testConnection();
+  }, []);
+
+  // Listen to Firebase Auth state & determine User Role (RBAC)
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user: User | null) => {
       if (user) {
+        let role: UserRole = 'student';
+        try {
+          const userDocRef = doc(db, 'users', user.uid);
+          const userDocSnap = await getDoc(userDocRef);
+          if (userDocSnap.exists()) {
+            role = (userDocSnap.data()?.role as UserRole) || 'student';
+          } else {
+            await setDoc(
+              userDocRef,
+              {
+                uid: user.uid,
+                displayName: user.displayName || 'Siswa Kelas 6 SD',
+                email: user.email,
+                photoURL: user.photoURL,
+                role: 'student',
+                createdAt: new Date().toISOString(),
+              },
+              { merge: true }
+            );
+          }
+        } catch (e: any) {
+          console.warn('Note loading user role:', e.message);
+        }
+
+        setUserRole(role);
         setCurrentUser({
           uid: user.uid,
           displayName: user.displayName || 'Siswa Kelas 6 SD',
           email: user.email,
           photoURL: user.photoURL,
+          role,
         });
       } else {
         // Check if demo user was active in session
         const demoUserJson = sessionStorage.getItem('sahabat_sehat_demo_user');
         if (demoUserJson) {
           try {
-            setCurrentUser(JSON.parse(demoUserJson));
+            const parsed = JSON.parse(demoUserJson);
+            setCurrentUser(parsed);
+            setUserRole(parsed.role || 'student');
           } catch (e) {
             setCurrentUser(null);
+            setUserRole('student');
           }
         } else {
           setCurrentUser(null);
+          setUserRole('student');
         }
       }
       setAuthLoading(false);
@@ -99,7 +175,8 @@ export default function App() {
     setJournalLoading(true);
 
     try {
-      const logsRef = collection(db, 'users', currentUser.uid, 'food_logs');
+      const effectiveUid = auth.currentUser?.uid || currentUser.uid;
+      const logsRef = collection(db, 'users', effectiveUid, 'food_logs');
       const q = query(logsRef, orderBy('timestamp', 'desc'));
 
       const unsubscribe = onSnapshot(
@@ -151,26 +228,193 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // Google Sign In handler
-  const handleGoogleSignIn = async () => {
+  // Listen to Firestore Structured `nutrition_logs` collection (Directive 2)
+  useEffect(() => {
+    if (!currentUser) {
+      setClassNutritionLogs([]);
+      return;
+    }
+
+    setClassLogsLoading(true);
+
+    try {
+      const isTeacherOrAdmin = userRole === 'teacher' || userRole === 'admin';
+      const effectiveUid = auth.currentUser?.uid || currentUser.uid;
+      const logsRef = collection(db, 'nutrition_logs');
+
+      // Teacher reads all class logs; student only reads own logs
+      const q = isTeacherOrAdmin
+        ? query(logsRef, orderBy('timestamp', 'desc'))
+        : query(logsRef, where('student_id', '==', effectiveUid), orderBy('timestamp', 'desc'));
+
+      const unsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          const logs: StructuredNutritionLog[] = snapshot.docs.map((docSnap) => {
+            const data = docSnap.data();
+            return {
+              id: docSnap.id,
+              student_id: data.student_id,
+              student_name: data.student_name,
+              timestamp: data.timestamp,
+              food_item: data.food_item || 'Camilan Kemasan',
+              selected_nutrient: data.selected_nutrient || 'Protein',
+              akg_percentage: Number(data.akg_percentage) || 0,
+              deficiency_percentage: Number(data.deficiency_percentage) || 0,
+              chosen_local_solution: data.chosen_local_solution || '',
+              balanced_status: Boolean(data.balanced_status),
+            };
+          });
+          setClassNutritionLogs(logs);
+          setClassLogsLoading(false);
+        },
+        (error) => {
+          console.warn('Firestore nutrition_logs listener note:', error.message);
+          // Fallback to local cache if offline
+          const localCached = localStorage.getItem('nutrition_logs_cache');
+          if (localCached) {
+            try {
+              setClassNutritionLogs(JSON.parse(localCached));
+            } catch (e) {
+              setClassNutritionLogs([]);
+            }
+          }
+          setClassLogsLoading(false);
+        }
+      );
+
+      return () => unsubscribe();
+    } catch (err: any) {
+      console.error('Error setting up nutrition_logs listener:', err);
+      setClassLogsLoading(false);
+    }
+  }, [currentUser, userRole]);
+
+  // Valid Educator Authorization PINs
+  const VALID_TEACHER_PINS = ['GURU2026', '772601', 'UKS2026'];
+
+  // Access Protection & Route Guard (Prevent Data Leakage - Directive 2)
+  useEffect(() => {
+    if (activeTab === 'dashboard') {
+      const isTeacherOrAdmin = userRole === 'teacher' || userRole === 'admin';
+      if (!isTeacherOrAdmin) {
+        console.warn('Unauthorized access attempt to Teacher Dashboard blocked. Redirecting to assistant.');
+        setActiveTab('assistant');
+        setClassNutritionLogs([]); // Prevent class data leakage into student memory
+        setNotificationToast({
+          show: true,
+          type: 'critical',
+          title: 'Akses Dasbor Terproteksi (Data Leakage Protection)',
+          message: 'Dasbor Pantau Kelas dan data agregat siswa terproteksi hanya untuk Guru PJOK atau Pembina UKS.',
+        });
+      }
+    }
+  }, [activeTab, userRole]);
+
+  // Role Switcher Handler
+  const handleSwitchRole = async (newRole: UserRole) => {
+    if (newRole === 'teacher' && userRole !== 'teacher' && userRole !== 'admin') {
+      const enteredPin = window.prompt(
+        'Verifikasi Pendidik: Masukkan PIN Guru PJOK (Demo: GURU2026):'
+      );
+      if (!enteredPin || !VALID_TEACHER_PINS.includes(enteredPin.trim().toUpperCase())) {
+        alert('PIN Guru tidak valid. Akses ke Dasbor Kelas ditolak.');
+        return;
+      }
+    }
+
+    setUserRole(newRole);
+    if (currentUser) {
+      const updatedUser = { ...currentUser, role: newRole };
+      setCurrentUser(updatedUser);
+      sessionStorage.setItem('sahabat_sehat_demo_user', JSON.stringify(updatedUser));
+
+      if (auth.currentUser) {
+        try {
+          await setDoc(doc(db, 'users', currentUser.uid), { role: newRole }, { merge: true });
+        } catch (e: any) {
+          console.warn('Note updating user role doc in Firestore:', e.message);
+        }
+      }
+    }
+
+    if (newRole === 'teacher') {
+      setActiveTab('dashboard');
+    } else {
+      setActiveTab('assistant');
+      setClassNutritionLogs([]);
+    }
+  };
+
+  // Google Sign In handler with Pre-Login Role selection & Teacher PIN verification
+  const handleGoogleSignIn = async (targetRole: UserRole = 'student', teacherPin?: string) => {
     setAuthLoading(true);
     setAuthError(null);
+
+    // Verify Teacher credential if teacher role requested
+    if (targetRole === 'teacher') {
+      const trimmedPin = (teacherPin || '').trim().toUpperCase();
+      if (!trimmedPin || !VALID_TEACHER_PINS.includes(trimmedPin)) {
+        setAuthLoading(false);
+        setAuthError('PIN Guru tidak valid. Masukkan PIN resmi (Demo: GURU2026) untuk login sebagai Guru.');
+        return;
+      }
+    }
+
     try {
       const result = await signInWithPopup(auth, googleProvider);
       sessionStorage.removeItem('sahabat_sehat_demo_user');
       if (result.user) {
+        let assignedRole: UserRole = targetRole === 'teacher' ? 'teacher' : 'student';
+
+        // Check if user already has an existing role in Firestore doc
+        try {
+          const userDocRef = doc(db, 'users', result.user.uid);
+          const userSnap = await getDoc(userDocRef);
+          if (userSnap.exists() && userSnap.data()?.role === 'teacher') {
+            assignedRole = 'teacher';
+          } else {
+            await setDoc(
+              userDocRef,
+              {
+                uid: result.user.uid,
+                displayName:
+                  result.user.displayName ||
+                  (assignedRole === 'teacher' ? 'Guru PJOK' : 'Siswa Kelas 6 SD'),
+                email: result.user.email,
+                photoURL: result.user.photoURL,
+                role: assignedRole,
+                updatedAt: new Date().toISOString(),
+              },
+              { merge: true }
+            );
+          }
+        } catch (docErr: any) {
+          console.warn('Note updating user role doc in Firestore:', docErr.message);
+        }
+
+        setUserRole(assignedRole);
         setCurrentUser({
           uid: result.user.uid,
-          displayName: result.user.displayName,
+          displayName:
+            result.user.displayName ||
+            (assignedRole === 'teacher' ? 'Guru PJOK' : 'Siswa Kelas 6 SD'),
           email: result.user.email,
           photoURL: result.user.photoURL,
+          role: assignedRole,
         });
+
+        if (assignedRole === 'teacher') {
+          setActiveTab('dashboard');
+        } else {
+          setActiveTab('assistant');
+        }
       }
     } catch (error: any) {
       console.error('Sign-in error:', error);
       if (error.code === 'auth/popup-blocked' || error.message?.includes('popup')) {
         setAuthError(
-          'Popup login terblokir oleh browser/iframe. Kamu dapat mengizinkan popup atau gunakan tombol "Masuk sebagai Siswa Uji Coba" di bawah.'
+          'Popup login terblokir oleh browser/iframe. Kamu dapat mengizinkan popup atau gunakan tombol "Masuk Cepat" di bawah.'
         );
       } else {
         setAuthError(`Gagal masuk: ${error.message || 'Silakan coba lagi.'}`);
@@ -180,17 +424,68 @@ export default function App() {
     }
   };
 
-  // Demo student sign-in (allows testing in any restricted iframe environment)
-  const handleDemoSignIn = () => {
+  // Demo student/teacher sign-in (allows testing in any restricted iframe environment)
+  const handleDemoSignIn = async (role: UserRole = 'student', teacherPin?: string) => {
+    if (role === 'teacher') {
+      const trimmedPin = (teacherPin || 'GURU2026').trim().toUpperCase();
+      if (!VALID_TEACHER_PINS.includes(trimmedPin)) {
+        setAuthError('PIN Guru tidak valid. Gunakan PIN resmi (Demo: GURU2026).');
+        return;
+      }
+    }
+
+    let effectiveUid = role === 'teacher' ? 'demo_guru_pesisir_001' : 'demo_siswa_pesisir_001';
+
+    try {
+      if (!auth.currentUser) {
+        const anonCred = await signInAnonymously(auth);
+        if (anonCred.user) {
+          effectiveUid = anonCred.user.uid;
+        }
+      } else {
+        effectiveUid = auth.currentUser.uid;
+      }
+    } catch (anonErr: any) {
+      console.info('Demo guest mode active with local UID:', anonErr.message);
+    }
+
     const demoUser: UserProfile = {
-      uid: 'siswa-demo-pesisir-01',
-      displayName: 'Budi (Siswa SD Pesisir)',
-      email: 'budi.pesisir@sekolah.id',
+      uid: effectiveUid,
+      displayName: role === 'teacher' ? 'Ibu Ratna, S.Pd. (Guru PJOK)' : 'Budi Santoso (Siswa Kelas 6)',
+      email: role === 'teacher' ? 'ratna.guru@sdnegeri-pesisir.sch.id' : 'budi.santoso@siswa.sdnegeri-pesisir.sch.id',
       photoURL: null,
+      role,
+      schoolClass: 'Kelas 6 SD Pesisir',
     };
     sessionStorage.setItem('sahabat_sehat_demo_user', JSON.stringify(demoUser));
     setCurrentUser(demoUser);
+    setUserRole(role);
     setAuthError(null);
+
+    // Direct role routing
+    if (role === 'teacher') {
+      setActiveTab('dashboard');
+    } else {
+      setActiveTab('assistant');
+    }
+
+    // Also persist user profile doc in Firestore if possible
+    try {
+      await setDoc(
+        doc(db, 'users', effectiveUid),
+        {
+          uid: effectiveUid,
+          displayName: demoUser.displayName,
+          email: demoUser.email,
+          role: demoUser.role,
+          schoolClass: demoUser.schoolClass,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (docErr: any) {
+      console.warn('Note updating user document in Firestore:', docErr.message);
+    }
   };
 
   // Sign out handler
@@ -293,6 +588,7 @@ export default function App() {
     setIsSavingJournal(true);
     try {
       const activeNutrient = analysisResult.nutrients[selectedNutrientKey];
+      const effectiveUid = auth.currentUser?.uid || currentUser.uid;
 
       const newLogData = {
         foodName: analysisResult.foodName,
@@ -324,12 +620,12 @@ export default function App() {
         deficit: confirmedDeficit,
         localFoodSolution: chosenFoodSolution,
         studentReflection: reflection,
-        userId: currentUser.uid,
+        userId: effectiveUid,
         timestamp: serverTimestamp(),
       };
 
       try {
-        const logsRef = collection(db, 'users', currentUser.uid, 'food_logs');
+        const logsRef = collection(db, 'users', effectiveUid, 'food_logs');
         await addDoc(logsRef, newLogData);
       } catch (firestoreError: any) {
         console.warn('Saving to local storage fallback due to Firestore permission/offline state:', firestoreError.message);
@@ -342,7 +638,84 @@ export default function App() {
         };
         localLogs.unshift(newEntry);
         setJournalLogs(localLogs);
-        localStorage.setItem(`food_logs_${currentUser.uid}`, JSON.stringify(localLogs));
+        localStorage.setItem(`food_logs_${effectiveUid}`, JSON.stringify(localLogs));
+      }
+
+      // 2. Structured Data Output for Class Dashboard (Directive 2 Requirement)
+      const structuredLog: StructuredNutritionLog = {
+        student_id: effectiveUid,
+        student_name: currentUser.displayName || 'Siswa',
+        timestamp: new Date().toISOString(),
+        food_item: analysisResult.foodName,
+        selected_nutrient: activeNutrient.label,
+        akg_percentage: activeNutrient.akgPercent,
+        deficiency_percentage: confirmedDeficit,
+        chosen_local_solution: chosenFoodSolution,
+        balanced_status: true,
+      };
+
+      try {
+        const nutritionLogsRef = collection(db, 'nutrition_logs');
+        await addDoc(nutritionLogsRef, structuredLog);
+      } catch (nutritionErr: any) {
+        console.warn('Saving structured nutrition log note:', nutritionErr.message);
+        const localClassLogs: StructuredNutritionLog[] = JSON.parse(
+          localStorage.getItem('nutrition_logs_cache') || '[]'
+        );
+        localClassLogs.unshift({ id: 'loc_' + Date.now(), ...structuredLog });
+        localStorage.setItem('nutrition_logs_cache', JSON.stringify(localClassLogs));
+        setClassNutritionLogs(localClassLogs);
+      }
+
+      // 3. Trigger External Notification Integration (Directives Trigger)
+      try {
+        let token = 'demo-token';
+        if (auth.currentUser) {
+          try {
+            token = await auth.currentUser.getIdToken();
+          } catch (tokErr) {
+            console.warn('Fallback auth token');
+          }
+        }
+
+        const notifyRes = await fetch('/api/notify-external', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            foodName: analysisResult.foodName,
+            selectedNutrient: activeNutrient.label,
+            akgPercentage: activeNutrient.akgPercent,
+            deficiencyPercentage: confirmedDeficit,
+            coastalSolutionChosen: chosenFoodSolution,
+            nutritionalSummary: analysisResult.nutrients,
+            studentName: currentUser.displayName,
+          }),
+        });
+
+        if (notifyRes.ok) {
+          const notifyResult = await notifyRes.json();
+          const evt = notifyResult.data?.eventType;
+          if (evt === 'CRITICAL_SODIUM_ALERT') {
+            setNotificationToast({
+              show: true,
+              type: 'critical',
+              title: 'Peringatan Gizi Dikirimkan',
+              message: 'Kandungan natrium tinggi terdeteksi (>30% AKG). Notifikasi telah dikirimkan ke guru PJOK.',
+            });
+          } else if (evt === 'HIGH_PROTEIN_DEFICIT') {
+            setNotificationToast({
+              show: true,
+              type: 'warning',
+              title: 'Notifikasi Defisit Protein',
+              message: 'Catatan defisit protein kemasan diteruskan ke portal guru untuk pemantauan lauk pesisir.',
+            });
+          }
+        }
+      } catch (notifErr: any) {
+        console.warn('External notification dispatch note:', notifErr.message);
       }
 
       // Celebrate with confetti!
@@ -372,13 +745,15 @@ export default function App() {
     if (!currentUser) return;
     if (!confirm('Apakah kamu yakin ingin menghapus catatan piring ini?')) return;
 
+    const effectiveUid = auth.currentUser?.uid || currentUser.uid;
+
     try {
       if (id.startsWith('local_')) {
         const updated = journalLogs.filter((l) => l.id !== id);
         setJournalLogs(updated);
-        localStorage.setItem(`food_logs_${currentUser.uid}`, JSON.stringify(updated));
+        localStorage.setItem(`food_logs_${effectiveUid}`, JSON.stringify(updated));
       } else {
-        const docRef = doc(db, 'users', currentUser.uid, 'food_logs', id);
+        const docRef = doc(db, 'users', effectiveUid, 'food_logs', id);
         await deleteDoc(docRef);
       }
     } catch (err: any) {
@@ -404,6 +779,8 @@ export default function App() {
         onSignOut={handleSignOut}
         onSignIn={handleGoogleSignIn}
         journalCount={journalLogs.length}
+        userRole={userRole}
+        onSwitchRole={handleSwitchRole}
       />
 
       {/* Main Content Area */}
@@ -510,6 +887,14 @@ export default function App() {
             )}
 
             {activeTab === 'guide' && <IsiPiringkuGuide />}
+
+            {activeTab === 'dashboard' && (
+              <TeacherDashboard
+                logs={classNutritionLogs}
+                loading={classLogsLoading}
+                userRole={userRole}
+              />
+            )}
           </div>
         )}
       </main>
@@ -519,6 +904,48 @@ export default function App() {
         isOpen={isSecurityModalOpen}
         onClose={() => setIsSecurityModalOpen(false)}
       />
+
+      {/* Floating External Notification Alert Toast */}
+      {notificationToast && (
+        <div
+          id="external-notification-toast"
+          className="fixed bottom-6 right-6 z-50 max-w-md bg-white p-4 rounded-2xl border-4 border-[#1A365D] shadow-[6px_6px_0px_#1A365D] transition-all animate-bounce"
+        >
+          <div className="flex items-start gap-3">
+            <div
+              className={`w-10 h-10 rounded-xl border-2 border-[#1A365D] flex items-center justify-center text-white shrink-0 shadow-[2px_2px_0px_#1A365D] ${
+                notificationToast.type === 'critical'
+                  ? 'bg-[#E65100]'
+                  : notificationToast.type === 'warning'
+                  ? 'bg-amber-500'
+                  : 'bg-[#00796B]'
+              }`}
+            >
+              <Bell className="w-5 h-5" />
+            </div>
+
+            <div className="flex-1 pr-2">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <span className="text-[10px] font-black uppercase px-2 py-0.5 bg-slate-100 rounded border border-[#1A365D]/30 text-[#1A365D]">
+                  Notifikasi Eksternal
+                </span>
+                <span className="text-[10px] font-bold text-emerald-700">Terkirim</span>
+              </div>
+              <h4 className="text-xs font-black text-[#1A365D] uppercase">{notificationToast.title}</h4>
+              <p className="text-xs font-medium text-slate-700 mt-0.5 leading-snug">
+                {notificationToast.message}
+              </p>
+            </div>
+
+            <button
+              onClick={() => setNotificationToast(null)}
+              className="text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-100 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Footer with Artistic Flair */}
       <footer className="mt-auto border-t-3 border-[#1A365D] bg-[#FDF8F1] py-6 text-center text-xs text-[#1A365D]">

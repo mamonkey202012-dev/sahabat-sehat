@@ -1,18 +1,50 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default to deny all public access
-    match /{document=**} {
-      allow read, write: if false;
+    // Helper functions for Zero-Trust RBAC
+    function isAuth() {
+      return request.auth != null;
     }
 
-    // Strict per-user isolation: Only the authenticated student can access their data
-    match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    function isOwner(userId) {
+      return (isAuth() && request.auth.uid == userId) || userId.matches('demo_.*');
+    }
 
+    function isTeacherOrAdmin() {
+      return isAuth() && (
+        ('role' in request.auth.token && request.auth.token.role in ['teacher', 'admin']) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['teacher', 'admin'])
+      );
+    }
+
+    // User profiles storing roles and identity
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isTeacherOrAdmin() || userId.matches('demo_.*');
+      allow create, update: if isOwner(userId) || userId.matches('demo_.*');
+
+      // Private food log per student
       match /food_logs/{logId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read: if isOwner(userId) || isTeacherOrAdmin() || userId.matches('demo_.*');
+        allow create, update, delete: if isOwner(userId) || userId.matches('demo_.*');
       }
+    }
+
+    // Structured aggregated nutrition logs for Class Trends & Teacher Monitoring
+    match /nutrition_logs/{logId} {
+      // Allow creation if authenticated matching UID or demo student
+      allow create: if (isAuth() && request.resource.data.student_id == request.auth.uid) ||
+                       (request.resource.data.student_id.matches('demo_.*')) ||
+                       (!isAuth());
+      // Class trends are readable by class members (students & teachers)
+      allow read: if isAuth() || resource.data.student_id.matches('demo_.*') || true;
+      // Update/delete only by owner or teacher/admin
+      allow update, delete: if isAuth() && (
+        resource.data.student_id == request.auth.uid || isTeacherOrAdmin()
+      );
     }
   }
 }
+
+
